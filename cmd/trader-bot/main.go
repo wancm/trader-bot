@@ -22,6 +22,7 @@ func main() {
 	_ = godotenv.Load()
 
 	addr := flag.String("mt5-addr", envOr("MT5_ADDR", "127.0.0.1:5000"), "TCP address for the mt5-bridge tick stream (env: MT5_ADDR)")
+	mt5BaseURL := flag.String("mt5-base-url", envOr("MT5_BASE_URL", "http://localhost:18812"), "HTTP base URL of the MT5 gateway (env: MT5_BASE_URL)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -39,7 +40,7 @@ func main() {
 	}
 
 	// 实例化 Facade
-	engine := decision.NewEngine(rules, signalChan, "http://localhost:18812", app_shared.AppLogger)
+	engine := decision.NewEngine(rules, signalChan, *mt5BaseURL, app_shared.AppLogger)
 
 	// 启动信号消费（包含上下文构建）
 	// ctx, cancel := context.WithCancel(context.Background())
