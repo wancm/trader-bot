@@ -3,8 +3,6 @@ package decision
 import (
 	"fmt"
 	"time"
-
-	"github.com/wancm/trader-bot/internal/marketdata"
 )
 
 type RSIRule struct {
@@ -13,7 +11,7 @@ type RSIRule struct {
 	CooldownDuration time.Duration
 }
 
-func (r RSIRule) Evaluate(tick marketdata.Tick) (bool, string) {
+func (r RSIRule) Evaluate(tick TickData) (bool, string) {
 	if r.Above {
 		if tick.RSI > r.Threshold {
 			reason := fmt.Sprintf("RSI overbought (%.2f > %.0f)", tick.RSI, r.Threshold)

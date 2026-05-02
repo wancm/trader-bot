@@ -53,7 +53,16 @@ func main() {
 	engine := decision.NewEngine(rules, signalChan)
 
 	listener.OnTick = func(tick marketdata.Tick) {
-		engine.ProcessTick(tick)
+		// 把 marketdata.Tick 转成 decision.TickData
+		dt := decision.TickData{
+			Symbol: tick.Symbol,
+			Bid:    tick.Bid,
+			Ask:    tick.Ask,
+			Time:   time.Unix(tick.Timestamp, 0),
+			RSI:    tick.RSI,
+			// 如果有更多字段，按需映射
+		}
+		engine.ProcessTick(dt)
 	}
 
 	if err := listener.ListenAndServe(ctx, *addr); err != nil {

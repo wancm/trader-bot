@@ -5,15 +5,13 @@ import (
 	"log"
 	"sync"
 	"time"
-
-	"github.com/wancm/trader-bot/internal/marketdata"
 )
 
 type SignalFilter struct {
-	rules       []Rule
-	lastSignal  map[string]time.Time // symbol -> 上次触发时间
-	mu          sync.Mutex
-	signalChan  chan<- SignalEvent   // 输出通道，由 Decision Engine 上层传入
+	rules      []Rule
+	lastSignal map[string]time.Time // symbol -> 上次触发时间
+	mu         sync.Mutex
+	signalChan chan<- SignalEvent // 输出通道，由 Decision Engine 上层传入
 }
 
 // NewSignalFilter 创建一个信号过滤器
@@ -26,7 +24,7 @@ func NewSignalFilter(rules []Rule, signalChan chan<- SignalEvent) *SignalFilter 
 }
 
 // ProcessTick 处理每一个 tick，检查所有规则
-func (f *SignalFilter) ProcessTick(tick marketdata.Tick) {
+func (f *SignalFilter) ProcessTick(tick TickData) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
