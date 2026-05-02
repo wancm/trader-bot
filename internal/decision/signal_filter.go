@@ -1,25 +1,31 @@
-// filter.go
+// decision/filter.go
 package decision
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 )
 
+// SignalFilter 根据规则过滤 Tick，生成 SignalEvent 并推送到 channel
 type SignalFilter struct {
 	rules      []Rule
-	lastSignal map[string]time.Time // symbol -> 上次触发时间
+	lastSignal map[string]time.Time // symbol → 上次触发时间
 	mu         sync.Mutex
-	signalChan chan<- SignalEvent // 输出通道，由 Decision Engine 上层传入
+	signalChan chan<- SignalEvent
+	logger     *slog.Logger
 }
 
-// NewSignalFilter 创建一个信号过滤器
-func NewSignalFilter(rules []Rule, signalChan chan<- SignalEvent) *SignalFilter {
+// NewSignalFilter 创建信号过滤器
+func NewSignalFilter(rules []Rule, signalChan chan<- SignalEvent, logger *slog.Logger) *SignalFilter {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &SignalFilter{
 		rules:      rules,
 		lastSignal: make(map[string]time.Time),
 		signalChan: signalChan,
+		logger:     logger,
 	}
 }
 
@@ -47,12 +53,17 @@ func (f *SignalFilter) ProcessTick(tick TickData) {
 			Reason:    reason,
 			Timestamp: now,
 		}
-		log.Printf("[SignalFilter] Triggered: %s %s", tick.Symbol, reason)
+		f.logger.Info("signal triggered",
+			"symbol", event.Symbol,
+			"reason", event.Reason,
+		)
 		// 非阻塞发送，避免拖慢行情处理
 		select {
 		case f.signalChan <- event:
 		default:
-			log.Printf("[SignalFilter] signal channel full, dropped event for %s", tick.Symbol)
+			f.logger.Warn("signal channel full, dropping event",
+				"symbol", tick.Symbol,
+			)
 		}
 	}
 }

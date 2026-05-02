@@ -5,12 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wancm/trader-bot/internal/marketdata"
+	"github.com/wancm/trader-bot/app_shared"
 )
 
 func TestRSIRule_Oversold(t *testing.T) {
-	rule := RSIRule{Threshold: 30, Above: false, CooldownDuration: 1 * time.Minute}
-	tick := marketdata.Tick{Symbol: "XAUUSD", RSI: 28.5}
+	rule := RSIRule{Threshold: 30, Above: false, CooldownDur: 1 * time.Minute}
+	tick := TickData{Symbol: "XAUUSD", RSI: 28.5}
 	ok, reason := rule.Evaluate(tick)
 	if !ok {
 		t.Fatal("expected rule to trigger for RSI 28.5")
@@ -19,8 +19,8 @@ func TestRSIRule_Oversold(t *testing.T) {
 }
 
 func TestRSIRule_NotTriggered(t *testing.T) {
-	rule := RSIRule{Threshold: 30, Above: false, CooldownDuration: 1 * time.Minute}
-	tick := marketdata.Tick{Symbol: "XAUUSD", RSI: 35.0}
+	rule := RSIRule{Threshold: 30, Above: false, CooldownDur: 1 * time.Minute}
+	tick := TickData{Symbol: "XAUUSD", RSI: 35.0}
 	ok, _ := rule.Evaluate(tick)
 	if ok {
 		t.Fatal("expected rule NOT to trigger for RSI 35.0")
@@ -30,11 +30,12 @@ func TestRSIRule_NotTriggered(t *testing.T) {
 func TestSignalFilter_Cooldown(t *testing.T) {
 	signalChan := make(chan SignalEvent, 10)
 	rules := []Rule{
-		RSIRule{Threshold: 30, Above: false, CooldownDuration: 500 * time.Millisecond},
+		RSIRule{Threshold: 30, Above: false, CooldownDur: 500 * time.Millisecond},
 	}
-	filter := NewSignalFilter(rules, signalChan)
 
-	tick := marketdata.Tick{Symbol: "XAUUSD", RSI: 28.0}
+	filter := NewSignalFilter(rules, signalChan, app_shared.AppLogger)
+
+	tick := TickData{Symbol: "XAUUSD", RSI: 28.0}
 
 	// 第一次应该触发
 	filter.ProcessTick(tick)
