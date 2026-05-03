@@ -51,10 +51,11 @@ type AIDecision struct {
 
 // AIClient handles communication with the DeepSeek API.
 type AIClient struct {
-	APIKey     string
-	BaseURL    string
-	Model      string
-	HTTPClient *http.Client
+	APIKey          string
+	BaseURL         string
+	Model           string
+	ReasoningEffort string // 新增：控制推理深度，如 "medium", "low"
+	HTTPClient      *http.Client
 }
 
 // NewAIClient creates a new DeepSeek client.
@@ -63,9 +64,10 @@ func NewAIClient(apiKey, baseURL, model string) *AIClient {
 		baseURL = "https://api.deepseek.com/v1"
 	}
 	return &AIClient{
-		APIKey:  apiKey,
-		BaseURL: baseURL,
-		Model:   model,
+		APIKey:          apiKey,
+		BaseURL:         baseURL,
+		Model:           model,
+		ReasoningEffort: "medium", // 默认使用中等推理深度
 		HTTPClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -74,13 +76,20 @@ func NewAIClient(apiKey, baseURL, model string) *AIClient {
 
 // ChatCompletion sends a completion request and returns the message content.
 func (c *AIClient) ChatCompletion(systemPrompt, userContent string) (string, error) {
-	reqBody := AIRequest{
-		Model: c.Model,
-		Messages: []Message{
+	reqBody := map[string]interface{}{
+		"model": c.Model,
+		"messages": []Message{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userContent},
 		},
 	}
+
+	if c.ReasoningEffort != "" {
+		reqBody["reasoning_effort"] = c.ReasoningEffort // 在这里设置推理深度
+	} else {
+		reqBody["reasoning_effort"] = "medium" // 默认值
+	}
+
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %w", err)

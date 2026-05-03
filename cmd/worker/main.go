@@ -12,6 +12,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/wancm/trader-bot/app_shared"
+	"github.com/wancm/trader-bot/internal/broker"
 	"github.com/wancm/trader-bot/internal/decision"
 	"github.com/wancm/trader-bot/internal/marketdata"
 	"github.com/wancm/trader-bot/internal/marketdata/mt5"
@@ -44,13 +45,17 @@ func main() {
 		app_shared.AppLogger.Info(".env not found in any candidate path, using system environment variables")
 	}
 
-	repository.Init(context.Background()) // 初始化数据库连接池
+	ctx := context.Background()
+
+	repository.Init(ctx) // 初始化数据库连接池
+
+	paperBroker := broker.NewPaperBroker(repository.PG_Pool) // 创建模拟券商实例
 
 	addr := flag.String("mt5-addr", envOr("MT5_ADDR", "127.0.0.1:5000"), "TCP address for the mt5-bridge tick stream (env: MT5_ADDR)")
 	mt5BaseURL := flag.String("mt5-base-url", envOr("MT5_BASE_URL", "http://localhost:18812"), "HTTP base URL of the MT5 gateway (env: MT5_BASE_URL)")
 	flag.Parse()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	listener := &mt5.Listener{Logger: app_shared.AppLogger}
@@ -83,24 +88,26 @@ func main() {
 		0.5,
 		app_shared.AppLogger,
 		repository.PG_Pool, // 传入数据库连接池
+		paperBroker,        // 传入 broker 实例
 	)
 
 	// 启动信号消费（包含上下文构建）
-	// ctx, cancel := context.WithCancel(context.Background())
-	// defer cancel()
 	engine.Start(ctx)
 
 	listener.OnTick = func(tick marketdata.Tick) {
-		// 把 marketdata.Tick 转成 decision.TickData
+		// 1. 更新 broker 的最新报价
+		paperBroker.UpdatePrices(tick.Symbol, tick.Bid, tick.Ask)
+
+		// 2. 转成 decision.TickData 并推入引擎
 		dt := decision.TickData{
 			Symbol: tick.Symbol,
 			Bid:    tick.Bid,
 			Ask:    tick.Ask,
-			Time:   time.Unix(tick.Timestamp, 0),
+			Time:   app_shared.UnixToTime(tick.Timestamp),
 			RSI:    tick.RSI,
 			// 如果有更多字段，按需映射
 		}
-		engine.ProcessTick(dt)
+		engine.ProcessTick(ctx, dt)
 	}
 
 	if err := listener.ListenAndServe(ctx, *addr); err != nil {

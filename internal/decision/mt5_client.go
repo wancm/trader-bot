@@ -76,7 +76,7 @@ func (c *MT5Client) FetchHistoricalBars(symbol, timeframe string, count int) ([]
 		return nil, fmt.Errorf("failed to decode mt5 response: %w", err)
 	}
 
-	app_shared.AppLogger.Info("mt5 returned data", "symbol", symbol, "bars", bars)
+	// app_shared.AppLogger.Info("mt5 returned data", "symbol", symbol, "bars", bars)
 
 	return bars, nil
 }

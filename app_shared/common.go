@@ -1,9 +1,11 @@
 package app_shared
 
 import (
+	"encoding/json"
 	"flag"
 	"log/slog"
 	"os"
+	"time"
 )
 
 var AppLogger = newLogger()
@@ -30,4 +32,19 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// UnixToTime 将 Unix 秒转换为 time.Time
+func UnixToTime(unixSec int64) time.Time {
+	return time.Unix(unixSec, 0)
+}
+
+// ToJsonIndent 将任意结构体序列化为带缩进的 JSON 字符串，便于日志记录
+func ToJsonIndent(v any) string {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+
+	return string(data)
 }
