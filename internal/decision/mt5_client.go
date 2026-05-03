@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/wancm/trader-bot/app_shared"
 )
 
 // HistoricalDataProvider 定义获取历史数据的接口，方便测试 mock
@@ -65,6 +67,7 @@ func (c *MT5Client) FetchHistoricalBars(symbol, timeframe string, count int) ([]
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		app_shared.AppLogger.Error("mt5 returned error!", "symbol", symbol, "status", resp.StatusCode, "err", string(body))
 		return nil, fmt.Errorf("mt5 returned %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -72,5 +75,8 @@ func (c *MT5Client) FetchHistoricalBars(symbol, timeframe string, count int) ([]
 	if err := json.NewDecoder(resp.Body).Decode(&bars); err != nil {
 		return nil, fmt.Errorf("failed to decode mt5 response: %w", err)
 	}
+
+	app_shared.AppLogger.Info("mt5 returned data", "symbol", symbol, "bars", bars)
+
 	return bars, nil
 }

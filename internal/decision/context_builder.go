@@ -8,64 +8,62 @@ import (
 
 // AIContext 是发送给 DeepSeek 的完整 JSON 结构
 type AIContext struct {
-	TraderProfile       TraderProfile       `json:"trader_profile"`
-	MarketSnapshot      MarketSnapshot      `json:"market_snapshot"`
-	TechnicalIndicators TechnicalIndicators `json:"technical_indicators"`
-	RecentPriceAction   RecentPriceAction   `json:"recent_price_action"`
-	MultiTimeframeData  MultiTimeframeData  `json:"multi_timeframe_data"`
-	PortfolioState      PortfolioState      `json:"portfolio_state"`
-	AnalysisGuidelines  AnalysisGuidelines  `json:"analysis_guidelines"`
+	TraderProfile       TraderProfile       `json:"tp"`
+	MarketSnapshot      MarketSnapshot      `json:"ms"`
+	TechnicalIndicators TechnicalIndicators `json:"ti"`
+	RecentPriceAction   RecentPriceAction   `json:"rpa"`
+	MultiTimeframeData  MultiTimeframeData  `json:"mtf"`
+	PortfolioState      PortfolioState      `json:"ps"`
+	AnalysisGuidelines  AnalysisGuidelines  `json:"ag"`
 }
 
-// 子结构体定义
 type TraderProfile struct {
-	AccountType   string `json:"account_type"`
-	AllowShort    bool   `json:"allow_short"`
-	RiskTolerance string `json:"risk_tolerance"`
+	AccountType   string `json:"at"` // cash / margin
+	AllowShort    bool   `json:"as"` // allow short selling
+	RiskTolerance string `json:"rt"` // low / medium / high
 }
 
 type MarketSnapshot struct {
-	Symbol      string  `json:"symbol"`
-	LatestPrice float64 `json:"latest_price"`
-	Bid         float64 `json:"bid"`
-	Ask         float64 `json:"ask"`
+	Symbol      string  `json:"sym"` // symbol
+	LatestPrice float64 `json:"lp"`  // latest price
+	Bid         float64 `json:"b"`
+	Ask         float64 `json:"a"`
 }
 
 type TechnicalIndicators struct {
-	RSI float64 `json:"rsi_14"`
-	// 后续可增加 MACD, SMA 等
+	RSI float64 `json:"rsi"` // rsi_14 直接叫 rsi，AI 能懂
 }
 
 type RecentBar struct {
-	Open  float64 `json:"open"`
-	High  float64 `json:"high"`
-	Low   float64 `json:"low"`
-	Close float64 `json:"close"`
+	Open  float64 `json:"o"`
+	High  float64 `json:"h"`
+	Low   float64 `json:"l"`
+	Close float64 `json:"c"`
 }
 
 type RecentPriceAction struct {
-	Timeframe string      `json:"timeframe"`
-	Bars      []RecentBar `json:"bars"`
+	Timeframe string      `json:"tf"` // e.g. "5m", "1h"
+	Bars      []RecentBar `json:"b"`  // bars -> b
 }
 
 type MultiTimeframeData struct {
-	Daily  []RecentBar `json:"daily"`
-	Hourly []RecentBar `json:"hourly"`
+	Daily  []RecentBar `json:"d"` // daily
+	Hourly []RecentBar `json:"h"` // hourly
 }
 
 type PortfolioState struct {
-	CurrentPosition int     `json:"current_position"`
-	AvgCost         float64 `json:"avg_cost"`
-	MaxLimit        int     `json:"max_position_limit"`
-	AccountBalance  float64 `json:"account_balance"`
+	CurrentPosition int     `json:"cp"` // current position
+	AvgCost         float64 `json:"ac"` // average cost
+	MaxLimit        int     `json:"ml"` // max position limit
+	AccountBalance  float64 `json:"ab"` // account balance
 }
 
 type AnalysisGuidelines struct {
-	DataDependency    string `json:"data_dependency"`
-	NoFabrication     string `json:"no_fabrication"`
-	UncertaintyExpr   string `json:"uncertainty_expression"`
-	ReasoningFormat   string `json:"reasoning_format"`
-	AvoidGeneralities string `json:"avoid_generalities"`
+	DataDependency    string `json:"dd"`    // base on provided data only
+	NoFabrication     string `json:"nf"`    // do not fabricate values
+	UncertaintyExpr   string `json:"ue"`    // if uncertain, say HOLD
+	ReasoningFormat   string `json:"rf"`    // step-by-step reasoning
+	AvoidGeneralities string `json:"avoid"` // avoid vague language
 }
 
 // ContextBuilder 使用 MT5 客户端构建 AI 上下文
@@ -81,12 +79,16 @@ func NewContextBuilder(provider HistoricalDataProvider) *ContextBuilder {
 
 // BuildContext 根据最新 Tick 和持仓状态构建 AI 上下文
 func (cb *ContextBuilder) BuildContext(tick TickData, portfolio PortfolioState) (AIContext, error) {
+
+	// TODO: 这里可以并行拉取不同周期的历史数据以加快速度
+
 	// 拉取多周期历史 K 线
 	dailyBars, err := cb.dataProvider.FetchHistoricalBars(tick.Symbol, "1d", 70)
 	if err != nil {
 		return AIContext{}, fmt.Errorf("failed to fetch daily bars: %w", err)
 	}
-	hourlyBars, err := cb.dataProvider.FetchHistoricalBars(tick.Symbol, "1h", 200)
+
+	hourlyBars, err := cb.dataProvider.FetchHistoricalBars(tick.Symbol, "1h", 150)
 	if err != nil {
 		return AIContext{}, fmt.Errorf("failed to fetch hourly bars: %w", err)
 	}
@@ -122,7 +124,7 @@ func (cb *ContextBuilder) BuildContext(tick TickData, portfolio PortfolioState) 
 
 // ToJSON 将上下文序列化为 JSON 字符串
 func (ctx AIContext) ToJSON() (string, error) {
-	b, err := json.MarshalIndent(ctx, "", "  ")
+	b, err := json.Marshal(ctx)
 	if err != nil {
 		return "", err
 	}
