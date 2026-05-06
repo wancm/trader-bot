@@ -61,16 +61,13 @@ type AIClient struct {
 // NewAIClient creates a new DeepSeek client.
 func NewAIClient(apiKey, baseURL, model string) *AIClient {
 	if baseURL == "" {
-		baseURL = "https://api.deepseek.com/v1"
+		baseURL = "https://api.deepseek.com"
 	}
 	return &AIClient{
-		APIKey:          apiKey,
-		BaseURL:         baseURL,
-		Model:           model,
-		ReasoningEffort: "medium", // 默认使用中等推理深度
-		HTTPClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		APIKey:     apiKey,
+		BaseURL:    baseURL,
+		Model:      model,
+		HTTPClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -84,10 +81,10 @@ func (c *AIClient) ChatCompletion(systemPrompt, userContent string) (string, err
 		},
 	}
 
+	// Only enable thinking mode when explicitly configured (incurs higher cost).
+	// Leave unset for standard flash (non-thinking) mode.
 	if c.ReasoningEffort != "" {
-		reqBody["reasoning_effort"] = c.ReasoningEffort // 在这里设置推理深度
-	} else {
-		reqBody["reasoning_effort"] = "medium" // 默认值
+		reqBody["reasoning_effort"] = c.ReasoningEffort
 	}
 
 	jsonData, err := json.Marshal(reqBody)
