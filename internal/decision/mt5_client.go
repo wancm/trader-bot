@@ -5,10 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
-
-	"github.com/wancm/trader-bot/app_shared"
 )
 
 // HistoricalDataProvider 定义获取历史数据的接口，方便测试 mock
@@ -39,15 +38,18 @@ func (b MT5Bar) Time() time.Time {
 type MT5Client struct {
 	BaseURL    string       // 例如 "http://localhost:18812"
 	HTTPClient *http.Client // 自定义 HTTP 客户端（可选）
+	logger     *slog.Logger
 }
 
 // NewMT5Client 创建 MT5 客户端
-func NewMT5Client(baseURL string) *MT5Client {
+func NewMT5Client(baseURL string, logger *slog.Logger) *MT5Client {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &MT5Client{
-		BaseURL: baseURL,
-		HTTPClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		BaseURL:    baseURL,
+		HTTPClient: &http.Client{Timeout: 10 * time.Second},
+		logger:     logger,
 	}
 }
 
@@ -67,7 +69,7 @@ func (c *MT5Client) FetchHistoricalBars(symbol, timeframe string, count int) ([]
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		app_shared.AppLogger.Error("mt5 returned error!", "symbol", symbol, "status", resp.StatusCode, "err", string(body))
+		c.logger.Error("mt5 returned error", "symbol", symbol, "status", resp.StatusCode, "err", string(body))
 		return nil, fmt.Errorf("mt5 returned %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -76,7 +78,7 @@ func (c *MT5Client) FetchHistoricalBars(symbol, timeframe string, count int) ([]
 		return nil, fmt.Errorf("failed to decode mt5 response: %w", err)
 	}
 
-	// app_shared.AppLogger.Info("mt5 returned data", "symbol", symbol, "bars", bars)
+	// c.logger.Info("mt5 returned data", "symbol", symbol, "bars", bars)
 
 	return bars, nil
 }

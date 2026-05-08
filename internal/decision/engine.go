@@ -13,6 +13,8 @@ import (
 	"github.com/wancm/trader-bot/internal/broker"
 )
 
+const retryDelay = time.Second
+
 // Engine 是决策引擎的外观，协调信号过滤、上下文构建、AI 调用、下单等
 type Engine struct {
 	signalFilter  *SignalFilter
@@ -39,7 +41,7 @@ func NewEngine(
 	dbPool *pgxpool.Pool,
 	brk broker.Broker, // 新增
 ) *Engine {
-	client := NewMT5Client(mt5BaseURL)
+	client := NewMT5Client(mt5BaseURL, logger)
 	return &Engine{
 		signalFilter:  NewSignalFilter(rules, signalChan, logger),
 		mt5Client:     client,
@@ -125,20 +127,17 @@ func (e *Engine) handleSignal(ctx context.Context, event SignalEvent) {
 		return
 	}
 
-	// 序列化 JSON（后续步骤可在此调用 AI）
-	jsonStr, _ := aiCtx.ToJSON()
-	e.logger.Info("AI context ready",
-		"symbol", event.Symbol,
-		"reason", event.Reason,
-		"json_size", len(jsonStr),
-	)
-
-	// 将 AI 上下文转为 JSON 作为 user content
+	// 序列化 JSON 作为 user content（后续步骤可在此调用 AI）
 	userContent, err := aiCtx.ToJSON()
 	if err != nil {
 		e.logger.Error("context marshalling failed", "symbol", event.Symbol, "err", err)
 		return
 	}
+	e.logger.Info("AI context ready",
+		"symbol", event.Symbol,
+		"reason", event.Reason,
+		"json_size", len(userContent),
+	)
 
 	// e.logger.Info("raw AI request", "symbol", event.Symbol, "content", userContent)
 
@@ -155,16 +154,16 @@ func (e *Engine) handleSignal(ctx context.Context, event SignalEvent) {
 			break
 		}
 		e.logger.Warn("AI call failed, retrying", "symbol", event.Symbol, "err", err, "retry", retry+1)
-		time.Sleep(1 * time.Second)
+		time.Sleep(retryDelay)
 	}
 
-	call_duration := time.Since(callStart) // 结束计时
+	callDuration := time.Since(callStart) // 结束计时
 
 	if err != nil {
 		e.logger.Error("AI call ultimately failed",
 			"symbol", event.Symbol,
 			"err", err,
-			"duration", call_duration.String(), // 记录失败调用耗时
+			"duration", callDuration.String(), // 记录失败调用耗时
 		)
 		return
 	}
@@ -172,7 +171,7 @@ func (e *Engine) handleSignal(ctx context.Context, event SignalEvent) {
 	// 打印 AI 调用成功后的耗时
 	e.logger.Info("AI call succeeded",
 		"symbol", event.Symbol,
-		"duration", call_duration.String(),
+		"duration", callDuration.String(),
 		"content", aiContent,
 	)
 
@@ -184,12 +183,12 @@ func (e *Engine) handleSignal(ctx context.Context, event SignalEvent) {
 		return
 	}
 
-	e.logAIDecision(ctx, event, userContent, aiContent, decision, modified, int(call_duration.Seconds()), tick, err)
+	e.logAIDecision(ctx, event, userContent, aiContent, decision, modified, int(callDuration.Milliseconds()), tick, err)
 
 	if modified {
 		e.logger.Warn("AI decision was modified", "symbol", event.Symbol, "action", decision.Action, "reason", decision.Reason)
 	}
-	if decision.Action == "HOLD" {
+	if decision.Action == actionHold {
 		e.logger.Info("final decision: HOLD", "symbol", event.Symbol)
 		return
 	}
@@ -224,7 +223,7 @@ func (e *Engine) handleSignal(ctx context.Context, event SignalEvent) {
 	}
 }
 
-func (e *Engine) logAIDecision(ctx context.Context, event SignalEvent, requestJSON, aiContent string, decision AIDecision, modified bool, call_durations int, tick TickData, aiErr error) {
+func (e *Engine) logAIDecision(ctx context.Context, event SignalEvent, requestJSON, aiContent string, decision AIDecision, modified bool, callDuration int, tick TickData, aiErr error) {
 	if e.aiLogRepo == nil {
 		return
 	}
@@ -233,7 +232,7 @@ func (e *Engine) logAIDecision(ctx context.Context, event SignalEvent, requestJS
 		aiContent = fmt.Sprintf("AI error: %v", aiErr)
 	}
 
-	if err := e.aiLogRepo.Insert(ctx, event.Symbol, tick.Time, event.Reason, requestJSON, aiContent, decision, modified, call_durations, tick); err != nil {
+	if err := e.aiLogRepo.Insert(ctx, event.Symbol, tick.Time, event.Reason, requestJSON, aiContent, decision, modified, callDuration, tick); err != nil {
 		e.logger.Error("failed to log AI decision", "symbol", event.Symbol, "err", err)
 	} else {
 		e.logger.Debug("AI decision logged to database", "symbol", event.Symbol)

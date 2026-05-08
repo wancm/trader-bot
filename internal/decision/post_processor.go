@@ -6,6 +6,12 @@ import (
 	"math"
 )
 
+const (
+	actionBuy  = "BUY"
+	actionSell = "SELL"
+	actionHold = "HOLD"
+)
+
 // PostProcessor 负责解析 AI 返回的 JSON 并进行安全修正
 type PostProcessor struct {
 	AllowShort        bool
@@ -31,7 +37,7 @@ func (p *PostProcessor) Process(aiContent string, currentShares int, maxLimit in
 
 	// 1. 置信度低于阈值 → HOLD
 	if raw.Confidence < p.ConfidenceMinimum {
-		raw.Action = "HOLD"
+		raw.Action = actionHold
 		raw.Quantity = 0
 		raw.Reason = "Confidence below threshold, forcing HOLD"
 		modified = true
@@ -39,8 +45,8 @@ func (p *PostProcessor) Process(aiContent string, currentShares int, maxLimit in
 	}
 
 	// 2. 禁止做空：SELL 但无持仓 → HOLD
-	if raw.Action == "SELL" && currentShares <= 0 && !p.AllowShort {
-		raw.Action = "HOLD"
+	if raw.Action == actionSell && currentShares <= 0 && !p.AllowShort {
+		raw.Action = actionHold
 		raw.Quantity = 0
 		raw.Reason = "Short selling not allowed, forcing HOLD"
 		modified = true
@@ -48,20 +54,20 @@ func (p *PostProcessor) Process(aiContent string, currentShares int, maxLimit in
 	}
 
 	// 3. 卖出数量不能超过持仓
-	if raw.Action == "SELL" && raw.Quantity > float64(currentShares) {
+	if raw.Action == actionSell && raw.Quantity > float64(currentShares) {
 		raw.Quantity = float64(currentShares)
 		raw.Reason = fmt.Sprintf("Sell quantity adjusted to max %d shares", currentShares)
 		modified = true
 		if raw.Quantity == 0 {
-			raw.Action = "HOLD"
+			raw.Action = actionHold
 		}
 	}
 
 	// 4. 买入量检查：不能超过余额或上限
-	if raw.Action == "BUY" {
+	if raw.Action == actionBuy {
 		maxBuyShares := maxLimit - currentShares
 		if maxBuyShares <= 0 {
-			raw.Action = "HOLD"
+			raw.Action = actionHold
 			raw.Quantity = 0
 			raw.Reason = "Already at max position limit, forcing HOLD"
 			modified = true
@@ -73,7 +79,7 @@ func (p *PostProcessor) Process(aiContent string, currentShares int, maxLimit in
 				modified = true
 			}
 			if raw.Quantity <= 0 {
-				raw.Action = "HOLD"
+				raw.Action = actionHold
 				raw.Reason = "Insufficient funds for minimum buy"
 				modified = true
 			}
@@ -81,8 +87,8 @@ func (p *PostProcessor) Process(aiContent string, currentShares int, maxLimit in
 	}
 
 	// 5. 若 Action 无效，则改为 HOLD
-	if raw.Action != "BUY" && raw.Action != "SELL" && raw.Action != "HOLD" {
-		raw.Action = "HOLD"
+	if raw.Action != actionBuy && raw.Action != actionSell && raw.Action != actionHold {
+		raw.Action = actionHold
 		raw.Quantity = 0
 		raw.Reason = "Invalid action, forcing HOLD"
 		modified = true

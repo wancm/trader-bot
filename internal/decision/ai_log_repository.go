@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/wancm/trader-bot/app_shared"
 )
 
 type AILogRepository struct {
@@ -18,16 +17,17 @@ func NewAILogRepository(pool *pgxpool.Pool) *AILogRepository {
 	return &AILogRepository{pool: pool}
 }
 
-func (r *AILogRepository) Insert(ctx context.Context, symbol string, tick_timestamp time.Time, triggerReason, requestJSON, responseRaw string, decision AIDecision, postProcessed bool, call_durations int, tick TickData) error {
+func (r *AILogRepository) Insert(ctx context.Context, symbol string, tickTimestamp time.Time, triggerReason, requestJSON, responseRaw string, decision AIDecision, postProcessed bool, callDuration int, tick TickData) error {
 	query := `
 		INSERT INTO ai_decision_log
 			(symbol, tick_timestamp, trigger_reason, request_json, response_raw, decision_json, post_processed, confidence, final_action, final_quantity, call_durations, tick_raw, created_at)
 		VALUES
 			($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	`
+	tickJSON, _ := json.Marshal(tick)
 	_, err := r.pool.Exec(ctx, query,
 		symbol,
-		tick_timestamp,
+		tickTimestamp,
 		triggerReason,
 		requestJSON,                  // 原始 JSON 字符串
 		responseRaw,                  // AI 原始输出
@@ -36,8 +36,8 @@ func (r *AILogRepository) Insert(ctx context.Context, symbol string, tick_timest
 		decision.Confidence,
 		decision.Action,
 		decision.Quantity,
-		call_durations,
-		app_shared.ToJsonIndent(tick),
+		callDuration,
+		string(tickJSON),
 		time.Now(),
 	)
 	return err

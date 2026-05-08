@@ -1,37 +1,27 @@
-package app_shared
+package shared
 
 import (
 	"encoding/json"
-	"flag"
 	"log/slog"
 	"os"
 	"time"
 )
 
-var AppLogger = newLogger()
+// AppLogger is the process-wide structured logger.
+// main reassigns it after loading .env if LOG_FORMAT changes.
+var AppLogger = NewLogger(os.Getenv("LOG_FORMAT"))
 
-func newLogger() *slog.Logger {
-	logFmt := flag.String("log-format", envOr("LOG_FORMAT", "text"), "log format: text or json (env: LOG_FORMAT)")
-	flag.Parse()
-
+// NewLogger creates a slog.Logger with the given format ("json" or text).
+func NewLogger(format string) *slog.Logger {
 	var handler slog.Handler
-	switch *logFmt {
-	case "json":
+	if format == "json" {
 		handler = slog.NewJSONHandler(os.Stdout, nil)
-	default:
+	} else {
 		handler = slog.NewTextHandler(os.Stdout, nil)
 	}
-	logger := slog.New(handler)
-	slog.SetDefault(logger)
-
-	return logger
-}
-
-func envOr(key, fallback string) string {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		return v
-	}
-	return fallback
+	l := slog.New(handler)
+	slog.SetDefault(l)
+	return l
 }
 
 // UnixToTime 将 Unix 秒转换为 time.Time
@@ -45,6 +35,5 @@ func ToJsonIndent(v any) string {
 	if err != nil {
 		panic(err)
 	}
-
 	return string(data)
 }

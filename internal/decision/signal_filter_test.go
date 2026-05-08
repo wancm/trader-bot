@@ -2,10 +2,9 @@
 package decision
 
 import (
+	"log/slog"
 	"testing"
 	"time"
-
-	"github.com/wancm/trader-bot/app_shared"
 )
 
 func TestRSIRule_Oversold(t *testing.T) {
@@ -33,7 +32,7 @@ func TestSignalFilter_Cooldown(t *testing.T) {
 		RSIRule{Threshold: 30, Above: false, CooldownDur: 500 * time.Millisecond},
 	}
 
-	filter := NewSignalFilter(rules, signalChan, app_shared.AppLogger)
+	filter := NewSignalFilter(rules, signalChan, slog.Default())
 
 	tick := TickData{Symbol: "XAUUSD", RSI: 28.0}
 

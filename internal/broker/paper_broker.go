@@ -3,11 +3,23 @@ package broker
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	actionBuy      = "BUY"
+	actionSell     = "SELL"
+	orderMarket    = "MARKET"
+	orderLimit     = "LIMIT"
+	statusFilled   = "FILLED"
+	statusPending  = "PENDING"
+	statusRejected = "REJECTED"
+)
+
 type PaperBroker struct {
+	mu   sync.RWMutex
 	pool *pgxpool.Pool
 	// 最新报价（外部注入）
 	latestBid float64
@@ -20,10 +32,11 @@ func NewPaperBroker(pool *pgxpool.Pool) *PaperBroker {
 }
 
 // UpdatePrices 更新当前报价（由行情回调驱动）
-func (b *PaperBroker) UpdatePrices(symbol string, bid, ask float64) {
+func (b *PaperBroker) UpdatePrices(_ string, bid, ask float64) {
 	// 简化处理，只记最新值；后续可根据 symbol 区分
-	b.latestBid = bid
-	b.latestAsk = ask
+	b.mu.Lock()
+	b.latestBid, b.latestAsk = bid, ask
+	b.mu.Unlock()
 }
 
 // PlaceOrder 下单入口
@@ -33,24 +46,21 @@ func (b *PaperBroker) PlaceOrder(ctx context.Context, req OrderRequest) (OrderRe
 	err := b.pool.QueryRow(ctx,
 		`INSERT INTO broker_orders (symbol, action, order_type, quantity, limit_price, reason)
 		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-		req.Symbol, req.Action, req.OrderType, req.Quantity, nullableFloat(req.Price, req.OrderType == "LIMIT"), req.Reason,
+		req.Symbol, req.Action, req.OrderType, req.Quantity, nullableFloat(req.Price, req.OrderType == orderLimit), req.Reason,
 	).Scan(&orderID)
 	if err != nil {
 		return OrderResponse{}, fmt.Errorf("insert order: %w", err)
 	}
 
 	switch req.OrderType {
-	case "MARKET":
+	case orderMarket:
 		// 立即按市价成交
 		return b.fillMarketOrder(ctx, orderID, req)
-	case "LIMIT":
+	case orderLimit:
 		// 限价单暂不成交，等待后续检查；此处直接返回 PENDING
-		return OrderResponse{
-			OrderID: orderID,
-			Status:  "PENDING",
-		}, nil
+		return OrderResponse{OrderID: orderID, Status: statusPending}, nil
 	default:
-		return OrderResponse{OrderID: orderID, Status: "REJECTED", Error: "unsupported order type"}, nil
+		return OrderResponse{OrderID: orderID, Status: statusRejected, Error: "unsupported order type"}, nil
 	}
 }
 
@@ -62,15 +72,19 @@ func (b *PaperBroker) fillMarketOrder(ctx context.Context, orderID int64, req Or
 		return OrderResponse{}, fmt.Errorf("load fee config: %w", err)
 	}
 
+	b.mu.RLock()
+	bid, ask := b.latestBid, b.latestAsk
+	b.mu.RUnlock()
+
 	// 成交价：买入用 ask，卖出用 bid，并加滑点
 	var fillPrice float64
-	if req.Action == "BUY" {
-		fillPrice = b.latestAsk + fee.slippageValue()
+	if req.Action == actionBuy {
+		fillPrice = ask + fee.slippageValue()
 	} else {
-		fillPrice = b.latestBid - fee.slippageValue()
+		fillPrice = bid - fee.slippageValue()
 	}
 	if fillPrice <= 0 {
-		return OrderResponse{OrderID: orderID, Status: "REJECTED", Error: "no market price available"}, nil
+		return OrderResponse{OrderID: orderID, Status: statusRejected, Error: "no market price available"}, nil
 	}
 
 	// 佣金计算：每手固定 + 交易额百分比
@@ -79,8 +93,8 @@ func (b *PaperBroker) fillMarketOrder(ctx context.Context, orderID int64, req Or
 
 	// 更新订单状态
 	_, err = b.pool.Exec(ctx,
-		`UPDATE broker_orders SET status='FILLED', filled_qty=$1, avg_fill_price=$2, commission=$3, updated_at=NOW() WHERE id=$4`,
-		req.Quantity, fillPrice, commission, orderID)
+		`UPDATE broker_orders SET status=$1, filled_qty=$2, avg_fill_price=$3, commission=$4, updated_at=NOW() WHERE id=$5`,
+		statusFilled, req.Quantity, fillPrice, commission, orderID)
 	if err != nil {
 		return OrderResponse{}, fmt.Errorf("update order: %w", err)
 	}
@@ -95,7 +109,7 @@ func (b *PaperBroker) fillMarketOrder(ctx context.Context, orderID int64, req Or
 
 	// 更新持仓
 	var delta float64
-	if req.Action == "BUY" {
+	if req.Action == actionBuy {
 		delta = req.Quantity
 	} else {
 		delta = -req.Quantity
@@ -116,7 +130,7 @@ func (b *PaperBroker) fillMarketOrder(ctx context.Context, orderID int64, req Or
 
 	// 更新账户余额（扣除成交金额+佣金） 买入扣钱，卖出加钱
 	var cashChange float64
-	if req.Action == "BUY" {
+	if req.Action == actionBuy {
 		cashChange = -(fillPrice*req.Quantity*100 + commission) // 假设1手=100单位
 	} else {
 		cashChange = fillPrice*req.Quantity*100 - commission
@@ -130,7 +144,7 @@ func (b *PaperBroker) fillMarketOrder(ctx context.Context, orderID int64, req Or
 
 	return OrderResponse{
 		OrderID:      orderID,
-		Status:       "FILLED",
+		Status:       statusFilled,
 		FilledQty:    req.Quantity,
 		AvgFillPrice: fillPrice,
 		Commission:   commission,
@@ -140,29 +154,35 @@ func (b *PaperBroker) fillMarketOrder(ctx context.Context, orderID int64, req Or
 // GetAccount 返回当前账户信息
 func (b *PaperBroker) GetAccount(ctx context.Context) (Account, error) {
 	var acc Account
-	err := b.pool.QueryRow(ctx, `SELECT balance, equity FROM broker_account WHERE id=1`).Scan(&acc.Balance, &acc.Equity)
-	return acc, err
+	if err := b.pool.QueryRow(ctx, `SELECT balance, equity FROM broker_account WHERE id=1`).Scan(&acc.Balance, &acc.Equity); err != nil {
+		return acc, fmt.Errorf("get account: %w", err)
+	}
+	return acc, nil
 }
 
 // GetPositions 返回所有持仓
 func (b *PaperBroker) GetPositions(ctx context.Context) ([]Position, error) {
 	rows, err := b.pool.Query(ctx, `SELECT symbol, quantity, avg_price FROM broker_positions WHERE quantity != 0`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get positions: %w", err)
 	}
 	defer rows.Close()
 	var pos []Position
 	for rows.Next() {
 		var p Position
 		if err := rows.Scan(&p.Symbol, &p.Quantity, &p.AvgPrice); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan position: %w", err)
 		}
 		pos = append(pos, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get positions: %w", err)
 	}
 	return pos, nil
 }
 
 // -------------------- 费用工具 --------------------
+
 type feeConfig struct {
 	commissionPerLot float64
 	commissionPct    float64
@@ -183,8 +203,7 @@ func (b *PaperBroker) loadFeeConfig(ctx context.Context) (feeConfig, error) {
 		`SELECT commission_per_lot, commission_pct, spread_points, slippage_points, swap_long_points, swap_short_points FROM broker_fee_config WHERE id=1`,
 	).Scan(&f.commissionPerLot, &f.commissionPct, &f.spreadPoints, &f.slippagePoints, &f.swapLong, &f.swapShort)
 	if err != nil {
-		// 没有配置则返回全零
-		return feeConfig{}, nil
+		return feeConfig{}, fmt.Errorf("load fee config: %w", err)
 	}
 	return f, nil
 }
