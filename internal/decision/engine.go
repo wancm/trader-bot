@@ -15,20 +15,61 @@ import (
 
 const retryDelay = time.Second
 
+// aiDecisionLog is the payload sent to the logger service for ai_decisions entries.
+type aiDecisionLog struct {
+	Symbol         string  `json:"symbol"`
+	Signal         string  `json:"signal"`
+	Action         string  `json:"action"`
+	Confidence     float64 `json:"confidence"`
+	Modified       bool    `json:"modified"`
+	CallDurationMs int     `json:"call_duration_ms"`
+	Response       string  `json:"response"`
+}
+
+// orderLog is the payload sent to the logger service for order entries.
+type orderLog struct {
+	Symbol       string  `json:"symbol"`
+	Action       string  `json:"action"`
+	OrderType    string  `json:"order_type"`
+	Quantity     float64 `json:"quantity"`
+	OrderID      int64   `json:"order_id"`
+	Status       string  `json:"status"`
+	FilledQty    float64 `json:"filled_qty"`
+	AvgFillPrice float64 `json:"avg_fill_price"`
+	Commission   float64 `json:"commission"`
+	Error        string  `json:"error,omitempty"`
+}
+
 // Engine 是决策引擎的外观，协调信号过滤、上下文构建、AI 调用、下单等
 type Engine struct {
-	signalFilter  *SignalFilter
-	mt5Client     *MT5Client
-	ctxBuilder    *ContextBuilder
-	aiClient      *AIClient
-	postProcessor *PostProcessor
-	broker        broker.Broker // 新增
-	getPortfolio  func(symbol string) (PortfolioState, error)
-	lastTick      map[string]TickData
-	mu            sync.Mutex
-	signalChan    chan SignalEvent
-	logger        *slog.Logger
-	aiLogRepo     *AILogRepository
+	signalFilter   *SignalFilter
+	mt5Client      *MT5Client
+	ctxBuilder     *ContextBuilder
+	aiClient       *AIClient
+	postProcessor  *PostProcessor
+	broker         broker.Broker
+	getPortfolio   func(symbol string) (PortfolioState, error)
+	lastTick       map[string]TickData
+	mu             sync.Mutex
+	signalChan     chan SignalEvent
+	logger         *slog.Logger
+	aiLogRepo      *AILogRepository
+	sendAIDecision func(msg string, payload any, t time.Time)
+	sendOrder      func(msg string, payload any, t time.Time)
+}
+
+// SetAILogForwarder wires a callback that forwards AI decisions to the logger service.
+// Call before Start. Typical wiring in main:
+//
+//	engine.SetAILogForwarder(func(msg string, payload any, t time.Time) {
+//	    logFwd.SendEntry("ai_decisions", msg, t, payload)
+//	})
+func (e *Engine) SetAILogForwarder(f func(msg string, payload any, t time.Time)) {
+	e.sendAIDecision = f
+}
+
+func (e *Engine) SetOrderForwarder(f func(msg string, payload any, t time.Time)) {
+	e.sendOrder = f
 }
 
 // NewEngine 创建一个新的决策引擎
@@ -185,6 +226,21 @@ func (e *Engine) handleSignal(ctx context.Context, event SignalEvent) {
 
 	e.logAIDecision(ctx, event, userContent, aiContent, decision, modified, int(callDuration.Milliseconds()), tick, err)
 
+	if e.sendAIDecision != nil {
+		payload := aiDecisionLog{
+			Symbol:         event.Symbol,
+			Signal:         event.Reason,
+			Action:         decision.Action,
+			Confidence:     decision.Confidence,
+			Modified:       modified,
+			CallDurationMs: int(callDuration.Milliseconds()),
+			Response:       aiContent,
+		}
+		msg := fmt.Sprintf("%s %s signal=%s confidence=%.2f duration=%dms",
+			event.Symbol, decision.Action, event.Reason, decision.Confidence, int(callDuration.Milliseconds()))
+		e.sendAIDecision(msg, payload, tick.Time)
+	}
+
 	if modified {
 		e.logger.Warn("AI decision was modified", "symbol", event.Symbol, "action", decision.Action, "reason", decision.Reason)
 	}
@@ -213,6 +269,17 @@ func (e *Engine) handleSignal(ctx context.Context, event SignalEvent) {
 	resp, err := e.broker.PlaceOrder(ctx, orderReq)
 	if err != nil {
 		e.logger.Error("broker order failed", "symbol", event.Symbol, "err", err)
+		if e.sendOrder != nil {
+			payload := orderLog{
+				Symbol:    event.Symbol,
+				Action:    decision.Action,
+				OrderType: decision.OrderType,
+				Quantity:  decision.Quantity,
+				Status:    "FAILED",
+				Error:     err.Error(),
+			}
+			e.sendOrder(fmt.Sprintf("%s %s FAILED: %v", event.Symbol, decision.Action, err), payload, tick.Time)
+		}
 	} else {
 		e.logger.Info("order placed",
 			"orderID", resp.OrderID,
@@ -220,6 +287,25 @@ func (e *Engine) handleSignal(ctx context.Context, event SignalEvent) {
 			"filledQty", resp.FilledQty,
 			"commission", resp.Commission,
 		)
+		if e.sendOrder != nil {
+			partial := resp.Status == "FILLED" && resp.FilledQty < decision.Quantity
+			status := resp.Status
+			if partial {
+				status = "PARTIAL"
+			}
+			payload := orderLog{
+				Symbol:       event.Symbol,
+				Action:       decision.Action,
+				OrderType:    decision.OrderType,
+				Quantity:     decision.Quantity,
+				OrderID:      resp.OrderID,
+				Status:       status,
+				FilledQty:    resp.FilledQty,
+				AvgFillPrice: resp.AvgFillPrice,
+				Commission:   resp.Commission,
+			}
+			e.sendOrder(fmt.Sprintf("%s %s %s filled=%.2f/%.2f", event.Symbol, decision.Action, status, resp.FilledQty, decision.Quantity), payload, tick.Time)
+		}
 	}
 }
 

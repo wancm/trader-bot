@@ -38,7 +38,7 @@ func (r *AILogRepository) Insert(ctx context.Context, symbol string, tickTimesta
 		decision.Quantity,
 		callDuration,
 		string(tickJSON),
-		time.Now(),
+		time.Now().UTC(),
 	)
 	return err
 }

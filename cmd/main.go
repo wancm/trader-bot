@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -24,7 +26,7 @@ func main() {
 	// successfully — so try each path independently and stop on the first hit.
 	// Must load before registering flags so envOr reads the correct defaults.
 	var envPath string
-	for _, p := range []string{"configs/.env", "../configs/.env", "../../configs/.env", "../../../configs/.env"} {
+	for _, p := range []string{".env", "../.env", "../../.env", "../../../.env"} {
 		if err := godotenv.Load(p); err == nil {
 			envPath = p
 			break
@@ -34,9 +36,12 @@ func main() {
 	addr := flag.String("mt5-addr", envOr("MT5_ADDR", "127.0.0.1:5000"), "TCP address for the mt5-bridge tick stream (env: MT5_ADDR)")
 	mt5BaseURL := flag.String("mt5-base-url", envOr("MT5_BASE_URL", "http://localhost:18812"), "HTTP base URL of the MT5 gateway (env: MT5_BASE_URL)")
 	logFormat := flag.String("log-format", envOr("LOG_FORMAT", "text"), "log format: text or json (env: LOG_FORMAT)")
+	loggerWSURL    := flag.String("logger-ws-url", envOr("LOGGER_WS_URL", "ws://127.0.0.1:9500"), "logger service WebSocket URL (env: LOGGER_WS_URL)")
+	brokerTickURL  := flag.String("broker-tick-url", envOr("BROKER_TICK_URL", "ws://127.0.0.1:8086/ticks"), "broker-manager tick WebSocket URL (env: BROKER_TICK_URL)")
 	flag.Parse()
 
-	shared.AppLogger = shared.NewLogger(*logFormat)
+	wsLogger, logFwd := shared.NewLoggerWithWS(*logFormat, *loggerWSURL, "trader-bot")
+	shared.AppLogger = wsLogger
 	logger := shared.AppLogger
 	if envPath != "" {
 		logger.Info("loaded env file", "path", envPath)
@@ -46,6 +51,11 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go logFwd.Run(ctx)
+
+	// 推送行情到 broker-manager 的 tick 端点
+	brokerFwd := shared.NewTickForwarder(*brokerTickURL)
+	go brokerFwd.Run(ctx)
 
 	// 初始化数据库连接池
 	dbConn := os.Getenv("DB_CONN")
@@ -86,7 +96,7 @@ func main() {
 		*mt5BaseURL,
 		aiAPIKey,
 		"https://api.deepseek.com",
-		"deepseek-v4-flash",
+		"deepseek-chat",
 		false,
 		0.5,
 		logger,
@@ -94,11 +104,38 @@ func main() {
 		paperBroker,
 	)
 
+	engine.SetAILogForwarder(func(msg string, payload any, t time.Time) {
+		logFwd.SendEntry("ai_decisions", msg, t, payload)
+	})
+
+	engine.SetOrderForwarder(func(msg string, payload any, t time.Time) {
+		logFwd.SendEntry("order", msg, t, payload)
+	})
+
 	// 启动信号消费（包含上下文构建）
 	engine.Start(ctx)
 
+	// tickLogThrottle limits tick entries sent to the logger to at most once per
+	// second per symbol so the queue is not overwhelmed during backtesting.
+	var (
+		tickLogMu   sync.Mutex
+		tickLogLast = make(map[string]time.Time)
+	)
+	shouldLogTick := func(symbol string) bool {
+		tickLogMu.Lock()
+		defer tickLogMu.Unlock()
+		now := time.Now()
+		if now.Sub(tickLogLast[symbol]) >= time.Second {
+			tickLogLast[symbol] = now
+			return true
+		}
+		return false
+	}
+
 	listener := &mt5.Listener{Logger: logger}
 	listener.OnTick = func(tick marketdata.Tick) {
+		tickTime := shared.UnixToTime(tick.Timestamp)
+
 		// 1. 更新 broker 的最新报价
 		paperBroker.UpdatePrices(tick.Symbol, tick.Bid, tick.Ask)
 
@@ -107,16 +144,32 @@ func main() {
 			Symbol: tick.Symbol,
 			Bid:    tick.Bid,
 			Ask:    tick.Ask,
-			Time:   shared.UnixToTime(tick.Timestamp),
+			Time:   tickTime,
 			RSI:    tick.RSI,
-			// 如果有更多字段，按需映射
 		}
 		engine.ProcessTick(ctx, dt)
+
+		// 3. 推送行情到 logger service — throttled to 1/s per symbol
+		if shouldLogTick(tick.Symbol) {
+			logFwd.SendEntry("tick",
+				fmt.Sprintf("%s bid=%.5f ask=%.5f rsi=%.2f", tick.Symbol, tick.Bid, tick.Ask, tick.RSI),
+				tickTime,
+				tick,
+			)
+		}
+
+		// 4. 推送行情到 broker-manager
+		brokerFwd.Send(tick)
 	}
 
-	if err := listener.ListenAndServe(ctx, *addr); err != nil {
-		logger.Error("mt5 listener exited with error", "err", err)
-		os.Exit(1)
+	for {
+		if err := listener.ListenAndServe(ctx, *addr); err != nil {
+			logger.Error("mt5 listener failed, retrying in 5s", "err", err)
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		time.Sleep(5 * time.Second)
 	}
 }
 

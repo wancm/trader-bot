@@ -34,7 +34,7 @@ func (f *SignalFilter) ProcessTick(tick TickData) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	now := time.Now()
+	now := time.Now().UTC()
 	for _, rule := range f.rules {
 		ok, reason := rule.Evaluate(tick)
 		if !ok {

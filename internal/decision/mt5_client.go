@@ -31,7 +31,7 @@ type MT5Bar struct {
 
 // Time 返回转换后的 time.Time
 func (b MT5Bar) Time() time.Time {
-	return time.Unix(b.Timestamp, 0)
+	return time.Unix(b.Timestamp, 0).UTC()
 }
 
 // MT5Client 通过 HTTP 从 mt5_remote 拉取历史数据
