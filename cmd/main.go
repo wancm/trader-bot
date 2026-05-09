@@ -3,16 +3,19 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 
+	"github.com/wancm/trader-bot/internal/admin"
 	"github.com/wancm/trader-bot/internal/broker"
 	"github.com/wancm/trader-bot/internal/decision"
 	"github.com/wancm/trader-bot/internal/marketdata"
@@ -33,11 +36,11 @@ func main() {
 		}
 	}
 
-	addr := flag.String("mt5-addr", envOr("MT5_ADDR", "127.0.0.1:5000"), "TCP address for the mt5-bridge tick stream (env: MT5_ADDR)")
-	mt5BaseURL := flag.String("mt5-base-url", envOr("MT5_BASE_URL", "http://localhost:18812"), "HTTP base URL of the MT5 gateway (env: MT5_BASE_URL)")
-	logFormat := flag.String("log-format", envOr("LOG_FORMAT", "text"), "log format: text or json (env: LOG_FORMAT)")
-	loggerWSURL    := flag.String("logger-ws-url", envOr("LOGGER_WS_URL", "ws://127.0.0.1:9500"), "logger service WebSocket URL (env: LOGGER_WS_URL)")
-	brokerTickURL  := flag.String("broker-tick-url", envOr("BROKER_TICK_URL", "ws://127.0.0.1:8086/ticks"), "broker-manager tick WebSocket URL (env: BROKER_TICK_URL)")
+	addr        := flag.String("mt5-addr", envOr("MT5_ADDR", "127.0.0.1:5000"), "TCP address for the mt5-bridge tick stream (env: MT5_ADDR)")
+	mt5BaseURL  := flag.String("mt5-base-url", envOr("MT5_BASE_URL", "http://localhost:18812"), "HTTP base URL of the MT5 gateway (env: MT5_BASE_URL)")
+	logFormat   := flag.String("log-format", envOr("LOG_FORMAT", "text"), "log format: text or json (env: LOG_FORMAT)")
+	loggerWSURL := flag.String("logger-ws-url", envOr("LOGGER_WS_URL", "ws://127.0.0.1:6000"), "logger service WebSocket URL (env: LOGGER_WS_URL)")
+	adminAddr   := flag.String("admin-addr", envOr("ADMIN_ADDR", "127.0.0.1:5001"), "admin REST API address (env: ADMIN_ADDR)")
 	flag.Parse()
 
 	wsLogger, logFwd := shared.NewLoggerWithWS(*logFormat, *loggerWSURL, "trader-bot")
@@ -53,9 +56,45 @@ func main() {
 	defer stop()
 	go logFwd.Run(ctx)
 
-	// 推送行情到 broker-manager 的 tick 端点
-	brokerFwd := shared.NewTickForwarder(*brokerTickURL)
-	go brokerFwd.Run(ctx)
+	adminSrv := &http.Server{Addr: *adminAddr, Handler: admin.NewMux()}
+	go func() {
+		logger.Info("admin API listening", "addr", *adminAddr, "swagger", "http://"+*adminAddr+"/swagger/")
+		if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("admin server error", "err", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = adminSrv.Shutdown(shutCtx)
+	}()
+
+	hbSrv := startHeartbeat(":9000", logger)
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = hbSrv.Shutdown(shutCtx)
+	}()
+
+	var (
+		tickSnapMu sync.RWMutex
+		tickSnap   = make(map[string]marketdata.Tick)
+	)
+	tickBcastSrv := startTickBroadcast(":8001", func() map[string]marketdata.Tick {
+		tickSnapMu.RLock()
+		defer tickSnapMu.RUnlock()
+		snap := make(map[string]marketdata.Tick, len(tickSnap))
+		for k, v := range tickSnap {
+			snap[k] = v
+		}
+		return snap
+	}, logger)
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tickBcastSrv.Shutdown(shutCtx)
+	}()
 
 	// 初始化数据库连接池
 	dbConn := os.Getenv("DB_CONN")
@@ -115,25 +154,12 @@ func main() {
 	// 启动信号消费（包含上下文构建）
 	engine.Start(ctx)
 
-	// tickLogThrottle limits tick entries sent to the logger to at most once per
-	// second per symbol so the queue is not overwhelmed during backtesting.
-	var (
-		tickLogMu   sync.Mutex
-		tickLogLast = make(map[string]time.Time)
-	)
-	shouldLogTick := func(symbol string) bool {
-		tickLogMu.Lock()
-		defer tickLogMu.Unlock()
-		now := time.Now()
-		if now.Sub(tickLogLast[symbol]) >= time.Second {
-			tickLogLast[symbol] = now
-			return true
-		}
-		return false
-	}
-
 	listener := &mt5.Listener{Logger: logger}
 	listener.OnTick = func(tick marketdata.Tick) {
+		if !shared.TickListening.Load() {
+			return
+		}
+
 		tickTime := shared.UnixToTime(tick.Timestamp)
 
 		// 1. 更新 broker 的最新报价
@@ -149,17 +175,9 @@ func main() {
 		}
 		engine.ProcessTick(ctx, dt)
 
-		// 3. 推送行情到 logger service — throttled to 1/s per symbol
-		if shouldLogTick(tick.Symbol) {
-			logFwd.SendEntry("tick",
-				fmt.Sprintf("%s bid=%.5f ask=%.5f rsi=%.2f", tick.Symbol, tick.Bid, tick.Ask, tick.RSI),
-				tickTime,
-				tick,
-			)
-		}
-
-		// 4. 推送行情到 broker-manager
-		brokerFwd.Send(tick)
+		tickSnapMu.Lock()
+		tickSnap[tick.Symbol] = tick
+		tickSnapMu.Unlock()
 	}
 
 	for {
@@ -178,4 +196,66 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func startTickBroadcast(addr string, getSnap func() map[string]marketdata.Tick, logger interface{ Info(string, ...any); Error(string, ...any) }) *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				if err := wsjson.Write(r.Context(), conn, getSnap()); err != nil {
+					return
+				}
+			}
+		}
+	})
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		logger.Info("tick broadcast listening", "addr", addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("tick broadcast error", "err", err)
+		}
+	}()
+	return srv
+}
+
+func startHeartbeat(addr string, logger interface{ Info(string, ...any); Error(string, ...any) }) *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case t := <-ticker.C:
+				if err := wsjson.Write(r.Context(), conn, map[string]int64{"ts": t.UnixMilli()}); err != nil {
+					return
+				}
+			}
+		}
+	})
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		logger.Info("heartbeat listening", "addr", addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("heartbeat server error", "err", err)
+		}
+	}()
+	return srv
 }

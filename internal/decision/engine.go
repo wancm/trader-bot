@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/wancm/trader-bot/internal/broker"
+	"github.com/wancm/trader-bot/internal/shared"
 )
 
 const retryDelay = time.Second
@@ -142,6 +143,11 @@ func (e *Engine) handleSignal(ctx context.Context, event SignalEvent) {
 	e.mu.Unlock()
 	if !ok {
 		e.logger.Warn("no last tick available", "symbol", event.Symbol)
+		return
+	}
+
+	if !shared.MakeOrders.Load() {
+		e.logger.Info("make-orders disabled, skipping AI and order placement", "symbol", event.Symbol)
 		return
 	}
 
