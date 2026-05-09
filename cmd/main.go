@@ -40,7 +40,7 @@ func main() {
 	mt5BaseURL  := flag.String("mt5-base-url", envOr("MT5_BASE_URL", "http://localhost:18812"), "HTTP base URL of the MT5 gateway (env: MT5_BASE_URL)")
 	logFormat   := flag.String("log-format", envOr("LOG_FORMAT", "text"), "log format: text or json (env: LOG_FORMAT)")
 	loggerWSURL := flag.String("logger-ws-url", envOr("LOGGER_WS_URL", "ws://127.0.0.1:6000"), "logger service WebSocket URL (env: LOGGER_WS_URL)")
-	adminAddr   := flag.String("admin-addr", envOr("ADMIN_ADDR", "127.0.0.1:5001"), "admin REST API address (env: ADMIN_ADDR)")
+	adminAddr   := flag.String("admin-addr", envOr("ADMIN_ADDR", "127.0.0.1:5003"), "admin REST API address (env: ADMIN_ADDR)")
 	flag.Parse()
 
 	wsLogger, logFwd := shared.NewLoggerWithWS(*logFormat, *loggerWSURL, "trader-bot")
@@ -81,7 +81,7 @@ func main() {
 		tickSnapMu sync.RWMutex
 		tickSnap   = make(map[string]marketdata.Tick)
 	)
-	tickBcastSrv := startTickBroadcast(":8001", func() map[string]marketdata.Tick {
+	tickBcastSrv := startTickBroadcast(":8002", func() map[string]marketdata.Tick {
 		tickSnapMu.RLock()
 		defer tickSnapMu.RUnlock()
 		snap := make(map[string]marketdata.Tick, len(tickSnap))
